@@ -1,0 +1,32 @@
+[workspace]
+resolver = "3"
+members = ["inator", "pro_macros"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+
+[profile.dev]
+opt-level = 1
+
+[profile.dev.package."*"]
+opt-level = 3
+
+[profile.release]
+codegen-units = 1
+lto = "thin"
+
+[profile.wasm-release]
+inherits = "release"
+opt-level = "s"
+strip = "debuginfo"
+
+[workspace.dependencies]
+bevy = { version = "0.17.3", features = ["dynamic_linking"] }
+log = { version = "0.4.28", features = ["max_level_debug", "release_max_level_warn"] }
+ciborium = { version = "0.2.2" }
+uuid = { version = "1.18.1" }
+serde = { version = "1.0.228" }
+gloo-net = { version = "0.6.0" }
+wasm-bindgen-futures = { version = "0.4.55" }
+
