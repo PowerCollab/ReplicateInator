@@ -9,12 +9,13 @@ use bevy::prelude::{Commands, Message, NonSend, NonSendMut, PreUpdate, Resource,
 
 use ciborium::{from_reader};
 use log::warn;
-use serde::de::DeserializeOwned;
+use erased_serde::Serialize as ErasedSerialize;
 use serde::{Deserialize, Serialize};
+use serde::de::DeserializeOwned;
 use uuid::Uuid;
 use crate::NetworkSide;
 use crate::plugins::connection::{ClientConnection, NetworkConnections, NetworkSideResource, ServerConnection};
-use crate::ports::{PortClient, PortServer, PortTypes};
+use crate::ports::{PortTypes};
 
 #[cfg(target_arch = "wasm32")]
 type NetResMut<'a, T> = NonSendMut<'a, T>;
@@ -28,23 +29,20 @@ type NetResMut<'a, T> = ResMut<'a, T>;
 #[cfg(not(target_arch = "wasm32"))]
 type NetRes<'a, T> = Res<'a, T>;
 
+#[cfg(not(target_arch = "wasm32"))]
+pub trait MessageSideTrait: Send + Sync + 'static + ErasedSerialize {}
 
 #[cfg(target_arch = "wasm32")]
-pub trait MessageTrait: 'static {
-    fn as_authentication(&self) -> bool {
-        false
-    }
-}
+pub trait MessageSideTrait: 'static {}
 
-#[cfg(not(target_arch = "wasm32"))]
-pub trait MessageTrait: Send + Sync + 'static {
+pub trait MessageTrait: MessageSideTrait {
     fn as_authentication(&self) -> bool {
         false
     }
 }
 
 pub trait MessageTraitPlugin{
-    fn register_message<T: MessageTrait + DeserializeOwned + Serialize>(&mut self);
+    fn register_message<T: MessageTrait + DeserializeOwned>(&mut self);
 }
 
 pub struct MessagingPlugin{
@@ -83,6 +81,25 @@ pub struct MessageFunctions{
     is_authentication_message: fn(message: &Box<dyn Any + Send + Sync>) -> bool
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+impl <T: Send + Sync + 'static + ErasedSerialize> MessageSideTrait for T {
+
+}
+
+impl<'a> serde::Serialize for dyn MessageTrait + 'a {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        erased_serde::serialize(self, serializer)
+    }
+}
+
+#[cfg(target_arch = "wasm32")]
+impl <T: 'static> MessageSideTrait for T {
+
+}
+
 impl Plugin for MessagingPlugin {
     fn build(&self, app: &mut App) {
         app.init_resource::<MessagesRegistry>();
@@ -96,7 +113,7 @@ impl Plugin for MessagingPlugin {
 }
 
 impl MessageTraitPlugin for App {
-    fn register_message<T: MessageTrait + DeserializeOwned + Serialize>(&mut self) {
+    fn register_message<T: MessageTrait + DeserializeOwned>(&mut self) {
         let network_side = {
             let world = self.world_mut();
             world.get_resource::<NetworkSideResource>()
@@ -132,19 +149,19 @@ impl MessageTraitPlugin for App {
     }
 }
 
-fn is_authentication_message<T: MessageTrait + DeserializeOwned + Serialize>(message: &Box<dyn Any + Send + Sync>) -> bool {
+fn is_authentication_message<T: MessageTrait + DeserializeOwned>(message: &Box<dyn Any + Send + Sync>) -> bool {
     let message_downcast = message.downcast_ref::<T>().expect("Failed to downcast");
 
     message_downcast.as_authentication()
 }
 
-fn deserialize_message<T: MessageTrait + DeserializeOwned + Serialize>(bytes: &[u8]) -> Box<dyn Any + Send + Sync + 'static> {
+fn deserialize_message<T: MessageTrait + DeserializeOwned>(bytes: &[u8]) -> Box<dyn Any + Send + Sync + 'static> {
     let msg: T = from_reader(bytes).expect("Failed to decode message");
 
     Box::new(msg)
 }
 
-fn dispatch_message<T: MessageTrait + DeserializeOwned + Serialize>(world: &mut World, message: Box<dyn Any>, network_side: &NetworkSide, port_type: PortTypes, port_number: u32, connection_name: &'static str, sender: Option<Uuid>)  {
+fn dispatch_message<T: MessageTrait + DeserializeOwned>(world: &mut World, message: Box<dyn Any>, network_side: &NetworkSide, port_type: PortTypes, port_number: u32, connection_name: &'static str, sender: Option<Uuid>)  {
     let message_downcast = message.downcast::<T>().expect("Failed to downcast");
 
     match network_side {
@@ -177,62 +194,34 @@ pub fn read_messages_client(
         let main_port = &mut client_connection.main_port;
 
         match main_port {
-            PortClient::Tcp(client_tcp) => {
-                match client_tcp.message_received_receiver.try_recv() {
-                    Ok(bytes) => {
-                        let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
+            Some(main_port) => {
+                if let Some(bytes) = main_port.check_messages_received() {
+                    let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
 
-                        match message_infos {
-                            Ok(message_infos) => {
-                                if let Some(message_functions) = messages_registry.1.get(&message_infos.message_id) {
-                                    let message = (message_functions.deserialize)(&*message_infos.message);
-                                    let dispatch = message_functions.dispatch;
-                                    let connection_name = client_connection.connection_name;
+                    match message_infos {
+                        Ok(message_infos) => {
+                            if let Some(message_functions) = messages_registry.1.get(&message_infos.message_id) {
+                                let message = (message_functions.deserialize)(&*message_infos.message);
+                                let dispatch = message_functions.dispatch;
+                                let connection_name = client_connection.connection_name;
 
-                                    commands.queue(move |world: &mut World| {
-                                        dispatch(world, message, &NetworkSide::Client, PortTypes::Tcp, 0, connection_name, None);
-                                    })
-                                }
-                            }
-                            Err(e) => {
-                                println!("Error getting message infos: {}", e);
+                                commands.queue(move |world: &mut World| {
+                                    dispatch(world, message, &NetworkSide::Client, PortTypes::Tcp, 0, connection_name, None);
+                                })
                             }
                         }
+                        Err(e) => {
+                            println!("Error getting message infos: {}", e);
+                            continue
+                        }
                     }
-                    Err(_) => {
-                        continue;
-                    }
+                }else {
+                    continue
                 }
             },
-            #[cfg(target_arch = "wasm32")]
-            PortClient::Wasm(wasm_client) => {
-                match wasm_client.message_received_receiver.try_recv() {
-                    Ok(bytes) => {
-                        let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
-
-                        match message_infos {
-                            Ok(message_infos) => {
-                                if let Some(message_functions) = messages_registry.1.get(&message_infos.message_id) {
-                                    let message = (message_functions.deserialize)(&*message_infos.message);
-                                    let dispatch = message_functions.dispatch;
-                                    let connection_name = client_connection.connection_name;
-
-                                    commands.queue(move |world: &mut World| {
-                                        dispatch(world, message, &NetworkSide::Client, PortTypes::Wasm, 0, connection_name, None);
-                                    })
-                                }
-                            }
-                            Err(e) => {
-                                println!("Error getting message infos: {}", e);
-                            }
-                        }
-                    }
-                    Err(_) => {
-                        continue;
-                    }
-                }
+            None => {
+                continue
             }
-            _ => {}
         }
     }
 }
@@ -246,42 +235,42 @@ pub fn read_messages_server(
         let main_port = &mut server_connection.main_port;
 
         match main_port {
-            PortServer::Tcp(server_tcp) => {
-                match server_tcp.message_received_receiver.try_recv() {
-                    Ok((bytes,sender)) => {
-                        let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
+            Some(main_port) => {
+                if let (Some(bytes), Some(sender)) = main_port.check_messages_received() {
+                    let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
 
-                        match message_infos {
-                            Ok(message_infos) => {
-                                if let Some(message_functions) = messages_registry.1.get(&message_infos.message_id) {
-                                    let message = (message_functions.deserialize)(&*message_infos.message);
-                                    let ref_message = &message;
-                                    let is_authentication_message = message_functions.is_authentication_message;
+                    match message_infos {
+                        Ok(message_infos) => {
+                            if let Some(message_functions) = messages_registry.1.get(&message_infos.message_id) {
+                                let message = (message_functions.deserialize)(&*message_infos.message);
+                                let ref_message = &message;
+                                let is_authentication_message = message_functions.is_authentication_message;
 
-                                    if !server_connection.clients_connected.contains_key(&sender) && !is_authentication_message(ref_message) {
-                                        warn!("Client sending messages without being authenticated yet");
-                                        continue;
-                                    }
-
-                                    let dispatch = message_functions.dispatch;
-                                    let connection_name = server_connection.connection_name;
-
-                                    commands.queue(move |world: &mut World| {
-                                        dispatch(world, message, &NetworkSide::Server, PortTypes::Tcp, 0, connection_name, Some(sender));
-                                    })
+                                if !server_connection.clients_connected.contains_key(&sender) && !is_authentication_message(ref_message) {
+                                    warn!("Client sending messages without being authenticated yet");
+                                    continue;
                                 }
-                            }
-                            Err(e) => {
-                                println!("Error getting message infos: {}", e);
+
+                                let dispatch = message_functions.dispatch;
+                                let connection_name = server_connection.connection_name;
+
+                                commands.queue(move |world: &mut World| {
+                                    dispatch(world, message, &NetworkSide::Server, PortTypes::Tcp, 0, connection_name, Some(sender));
+                                })
                             }
                         }
+                        Err(e) => {
+                            println!("Error getting message infos: {}", e);
+                            continue
+                        }
                     }
-                    Err(_) => {
-                        continue;
-                    }
+                }else {
+                    continue
                 }
+            },
+            None => {
+                continue
             }
-            _ => {}
         }
     }
 }

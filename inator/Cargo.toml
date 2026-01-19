@@ -9,14 +9,16 @@ log = { workspace = true }
 ciborium = { workspace = true }
 uuid = { workspace = true }
 serde = { workspace = true }
+erased-serde = { workspace = true }
 gloo-net = { workspace = true, features = ["websocket"] }
 wasm-bindgen-futures = { workspace = true }
 pro_macros = { path = "../pro_macros" }
 tokio = { version = "1.48.0", features = ["full"] }
 tokio-rustls = { version = "0.26.4", default-features = false, features = ["ring"] }
-tokio-tungstenite = { version = "0.28.0" }
+tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
 futures-util = { version = "0.3.31" }
 rustls = { version = "0.23.35", default-features = false, features = ["ring"] }
+tungstenite = { version = "0.28.0" }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 tokio = { version = "1.48.0", features = ["sync", "rt", "macros", "time", "io-util"] }
