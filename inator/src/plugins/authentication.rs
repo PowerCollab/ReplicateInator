@@ -15,7 +15,6 @@ use crate::NetworkSide;
 use crate::plugins::connection::{ClientConnection, NetworkConnections};
 #[cfg(not(target_arch = "wasm32"))]
 use crate::plugins::connection::{ClientConnection, NetworkConnections, ServerConnection};
-use crate::ports::PortServer;
 
 #[cfg(target_arch = "wasm32")]
 type ConnMut<T> = NonSendMut<T>;
@@ -117,22 +116,22 @@ pub fn authentication_message_server<T: AuthenticationTrait + MessageTrait>(
     for ev in message_received_from_client.read() {
         let message = &mut ev.message;
         let uuid = &ev.sender.unwrap();
-
         let server_connection = server_connections.0.get_mut(ev.connection_name);
+        let port_number = ev.port_number;
 
         if let Some(server_connection) = server_connection{
             let (can,message) = message.authenticate(&server_connection, &mut commands);
 
             if can {
-                server_connection.authenticate_client(*uuid);
+                server_connection.authenticate_client(*uuid, port_number);
 
-                match &mut server_connection.main_port {
-                    PortServer::Tcp(server_tcp) => {
-                        server_tcp.send_message::<AuthenticatedUuid>(&AuthenticatedUuid(*uuid),&uuid,&server_connection.runtime);
+                if port_number == 0 {
+                    if let Some(mut main_port) = server_connection.main_port.take() {
+                        main_port.send_message(Box::new(&AuthenticatedUuid(*uuid)),&uuid,server_connection);
+
+                        server_connection.main_port = Some(main_port);
                     }
-                    _ => {}
                 }
-
             }else {
                 warn!("Failed to authenticate connection, reason: {}", message);
                 continue;

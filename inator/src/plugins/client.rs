@@ -1,24 +1,11 @@
-use std::sync::Arc;
 use bevy::app::{App, First, Plugin};
 
 #[cfg(target_arch = "wasm32")]
 use bevy::prelude::{IntoScheduleConfigs, NonSendMut};
-#[cfg(target_arch = "wasm32")]
-use futures_util::stream::{SplitSink, SplitStream};
-#[cfg(target_arch = "wasm32")]
-use futures_util::StreamExt;
-#[cfg(target_arch = "wasm32")]
-use std::cell::RefCell;
-#[cfg(target_arch = "wasm32")]
-use std::rc::Rc;
 
 #[cfg(not(target_arch = "wasm32"))]
 use bevy::prelude::{IntoScheduleConfigs, ResMut};
-use tokio::io::split;
-use tokio::sync::Mutex;
 use crate::plugins::connection::{ClientConnection, ConnectionTrait, NetworkConnections};
-use crate::ports::{PortClient};
-use crate::ports::tcp::client::{ReadType, StreamType, WriteType};
 
 #[cfg(target_arch = "wasm32")]
 type NetRes<'a, T> = NonSendMut<'a, T>;
@@ -56,33 +43,24 @@ fn check_main_port_dropped(
         let main_port = &mut client_connection.main_port;
 
         match main_port {
-            PortClient::Tcp(client_tcp) => {
-                match client_tcp.connection_down_receiver.try_recv() {
-                    Ok(_) => {
-                        client_tcp.connected = false;
-                        client_tcp.connecting = false;
-                        client_tcp.listening = false;
-                        client_connection.connected = false;
+            Some(main_port) => {
+                let (dropped,can_reconnect) = main_port.check_port_dropped();
 
-                        match client_tcp.write_half.take() {
-                            None => {}
-                            Some(write_half) => { drop(write_half) }
-                        };
+                if dropped {
+                    client_connection.connected = false;
 
-                        match client_tcp.read_half.take() {
-                            None => {}
-                            Some(read_half) => { drop(read_half) }
-                        };
+                    if can_reconnect { continue; }
 
-                        if client_tcp.settings.try_reconnect { continue }
-
-                        disconnect_vector.push(client_connection.connection_name);
-                    }
-                    Err(_) => {
-                        continue;
-                    }
+                    disconnect_vector.push(client_connection.connection_name);
                 }
-            },
+            }
+            None => {
+                continue
+            }
+        }
+
+        /*
+        match main_port {
             #[cfg(target_arch = "wasm32")]
             PortClient::Wasm(client_wasm) => {
                 match client_wasm.connection_down_receiver.try_recv() {
@@ -112,7 +90,7 @@ fn check_main_port_dropped(
                 }
             }
             _ => {}
-        }
+        } */
     }
 
     for connection_name in disconnect_vector {
@@ -127,45 +105,16 @@ fn check_connected_to_main_port(
         let main_port = &mut client_connection.main_port;
 
         match main_port {
-            PortClient::Tcp(client_tcp) => {
-                if client_tcp.connected { continue; }
-
-                match client_tcp.connected_to_server_receiver.try_recv() {
-                    Ok((stream_type, socket)) => {
-                        client_tcp.connected = true;
-
-                        let settings = &client_tcp.settings;
-
-                        match stream_type {
-                            StreamType::Stream(stream) => {
-                                match stream.set_nodelay(settings.no_delay) {
-                                    Ok(_) => {}
-                                    _ => {}
-                                }
-
-                                let (read_half,write_half) = stream.into_split();
-
-                                client_tcp.write_half = Some(WriteType::Stream(Arc::new(Mutex::new(write_half))));
-                                client_tcp.read_half = Some(ReadType::Stream(Arc::new(Mutex::new(read_half))));
-                                client_tcp.socket_addr = Some(socket)
-                            }
-                            StreamType::TlsStream(mut tls_stream) => {
-                                match tls_stream.get_mut().0.set_nodelay(settings.no_delay) {
-                                    Ok(_) => {}
-                                    _ => {}
-                                }
-
-                                let (read_half,write_half) = split(tls_stream);
-
-                                client_tcp.write_half = Some(WriteType::TlsStream(Arc::new(Mutex::new(write_half))));
-                                client_tcp.read_half = Some(ReadType::TlsStream(Arc::new(Mutex::new(read_half))));
-                                client_tcp.socket_addr = Some(socket)
-                            }
-                        }
-                    }
-                    Err(_) => {}
-                }
+            Some(main_port) => {
+                main_port.check_connected_to_server();
             },
+            None => {
+                continue
+            }
+        }
+
+        /*
+        match main_port {
             #[cfg(target_arch = "wasm32")]
             PortClient::Wasm(client_wasm) => {
                 if client_wasm.connected { continue; }
@@ -183,7 +132,7 @@ fn check_connected_to_main_port(
                 }
             }
             _ => {}
-        }
+        }*/
     }
 }
 
@@ -191,39 +140,10 @@ fn check_listening_to_main_port(
     mut network_connection: NetRes<NetworkConnections<ClientConnection>>
 ){
     for (_,client_connection) in network_connection.0.iter_mut() {
-        let main_port = &mut client_connection.main_port;
+        if let Some(mut main_port) = client_connection.main_port.take() {
+            main_port.start_listening_to_server(client_connection);
 
-        match main_port {
-            PortClient::Tcp(client_tcp) => {
-                if client_tcp.listening { continue; }
-
-                client_tcp.start_listening_server(&client_connection.runtime);
-            },
-            #[cfg(target_arch = "wasm32")]
-            PortClient::Wasm(client_wasm) => {
-                if client_wasm.listening { continue; }
-
-                client_wasm.start_listening_server();
-            }
-            _ => {}
-        }
-    }
-}
-
-#[cfg(target_arch = "wasm32")]
-fn check_messages_queued_main_port(
-    mut network_connection: NetRes<NetworkConnections<ClientConnection>>
-){
-    for (_,client_connection) in network_connection.0.iter_mut() {
-        let main_port = &mut client_connection.main_port;
-
-        match main_port {
-            PortClient::Wasm(client_wasm) => {
-                client_wasm.send_message_queued();
-            }
-            _ => {
-
-            }
+            client_connection.main_port = Some(main_port);
         }
     }
 }

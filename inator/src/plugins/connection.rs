@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use bevy::app::App;
 use bevy::prelude::{Plugin, Resource};
+use log::warn;
 use tokio::runtime::Runtime;
 use uuid::Uuid;
 use crate::NetworkSide;
@@ -8,19 +9,10 @@ use crate::plugins::authentication::{AuthenticationMessage, AuthenticationPlugin
 use crate::plugins::client::ClientConnectionPlugin;
 use crate::plugins::messaging::MessagingPlugin;
 use crate::plugins::server::ServerConnectionPlugin;
-use crate::ports::{PortClient, PortServer, PortSettings};
-use crate::ports::tcp::client::ClientTcp;
-use crate::ports::tcp::server::{ServerTcp};
-use crate::ports::tcp::TcpSettings;
-
-#[cfg(target_arch = "wasm32")]
-use crate::ports::wasm::client::WasmClient;
-
-#[cfg(target_arch = "wasm32")]
-use crate::ports::wasm::WasmSettings;
+use crate::ports::{ClientPortTrait, PortSideSettings, ServerPortTrait};
 
 pub trait ConnectionTrait: Default{
-    fn new(connection_name: &'static str, settings: PortSettings) -> Option<Self>;
+    fn new(connection_name: &'static str, settings: PortSideSettings) -> Option<Self>;
     fn start_connection(&mut self);
     fn drop_connection(&mut self);
 }
@@ -35,18 +27,19 @@ pub struct ServerConnection{
     pub runtime: Option<Runtime>,
     pub connection_name: &'static str,
     pub connected: bool,
-    pub ports: HashMap<u32, PortServer>,
-    pub main_port: PortServer,
+    pub ports: HashMap<u32, Box<dyn ServerPortTrait>>,
+    pub main_port: Option<Box<dyn ServerPortTrait>>,
     pub clients_connected: HashMap<Uuid, Vec<u32>>
 }
+
 #[derive(Default)]
 pub struct ClientConnection{
     #[cfg(not(target_arch = "wasm32"))]
     pub runtime: Option<Runtime>,
     pub connection_name: &'static str,
     pub connected: bool,
-    pub ports: HashMap<u32, PortClient>,
-    pub main_port: PortClient,
+    pub ports: HashMap<u32, Box<dyn ClientPortTrait>>,
+    pub main_port: Option<Box<dyn ClientPortTrait>>,
     pub local_uuid: Option<Uuid>,
 }
 
@@ -55,44 +48,47 @@ pub struct NetworkSideResource(pub NetworkSide);
 
 #[derive(Resource, Default)]
 pub struct NetworkConnections<T: ConnectionTrait>(pub HashMap<String, T>);
-
 #[cfg(not(target_arch = "wasm32"))]
 impl ConnectionTrait for ServerConnection{
-    fn new(connection_name: &'static str, settings: PortSettings) -> Option<Self>
+    fn new(connection_name: &'static str, settings: PortSideSettings) -> Option<Self>
     {
         match settings {
-            PortSettings::Tcp(tcp_settings) => {
-                match tcp_settings {
-                    TcpSettings::Server(tcp_settings_server) => {
-                        let server_tcp = ServerTcp::new(tcp_settings_server).with_main_port();
+            PortSideSettings::Server(mut settings) => {
+                let server_port_option = settings.create_server_port();
 
-                        Some(ServerConnection{
-                            runtime: None,
-                            connection_name,
-                            connected: false,
-                            ports: HashMap::new(),
-                            main_port: PortServer::Tcp(server_tcp),
-                            clients_connected: HashMap::new(),
-                        })
-                    },
-                    _ => {
-                        print!("This settings is not a TcpSettingsServer");
-                        None
-                    }
+                if let Some(server_port) = server_port_option {
+                    Some(ServerConnection{
+                        runtime: None,
+                        connection_name,
+                        connected: false,
+                        ports: HashMap::new(),
+                        main_port: Some(server_port),
+                        clients_connected: HashMap::new(),
+                    })
+                }else{
+                    warn!("This settings is invalid");
+                    None
                 }
-            }
+            },
+            PortSideSettings::Client(_) => {
+                warn!("Client settings not allowed on server");
+                None
+            },
         }
     }
 
     fn start_connection(&mut self) {
         self.connected = true;
 
-        match &mut self.main_port { 
-            PortServer::Tcp(server_tcp) => {
-                self.runtime = Some(Runtime::new().unwrap());
-                server_tcp.connect(&self.runtime);
-            }
-            _ => {}
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.runtime.is_none() {
+            self.runtime = Some(Runtime::new().unwrap());
+        }
+
+        if let Some(mut main_port) = self.main_port.take() {
+            main_port.connect(self);
+
+            self.main_port = Some(main_port);
         }
     }
 
@@ -105,62 +101,46 @@ impl ConnectionTrait for ServerConnection{
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ServerConnection {
-    pub fn authenticate_client(&mut self, uuid: Uuid){
+    pub fn authenticate_client(&mut self, uuid: Uuid, port_number: u32){
         if self.clients_connected.contains_key(&uuid) {
             println!("{} is already connected", uuid);
         }else{
             self.clients_connected.insert(uuid, [0].to_vec());
 
-            let main_port = &mut self.main_port;
-            
-            match main_port {
-                PortServer::Tcp(server_tcp) => {
-                    if server_tcp.not_authenticated_listening.contains_key(&uuid){
-                        let mut listening_infos = server_tcp.not_authenticated_listening.remove(&uuid).unwrap();
-
-                        listening_infos.listening = true;
-
-                        server_tcp.listening_clients.insert(uuid, listening_infos);
-                        server_tcp.start_listening_authenticated_client(&uuid, &self.runtime);
-
-                        match server_tcp.client_authenticated_sender.send(uuid) {
-                            Ok(_) => {}
-                            Err(_) => {}
-                        }
-                    }
+            if port_number == 0 {
+                if let Some(mut main_port) = self.main_port.take() {
+                    main_port.authenticate_client(uuid, self);
+                    
+                    self.main_port = Some(main_port);
                 }
-                _ => {}
             }
         }
     }
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(not(target_arch = "wasm32"))]
 impl ConnectionTrait for ClientConnection{
-    fn new(connection_name: &'static str, settings: PortSettings) -> Option<Self> {
+    fn new(connection_name: &'static str, settings: PortSideSettings) -> Option<Self> {
         match settings {
-            PortSettings::Wasm(wasm_settings) => {
-                match wasm_settings {
-                    WasmSettings::Client(wasm_settings_client) => {
-                        let client_wasm = WasmClient::new(wasm_settings_client).with_main_port();
+            PortSideSettings::Client(settings) => {
+                let client_port = settings.create_client_port();
 
-                        Some(ClientConnection{
-                            runtime: None,
-                            connection_name,
-                            connected: false,
-                            ports: HashMap::new(),
-                            main_port: PortClient::Wasm(client_wasm),
-                            local_uuid: None,
-                        })
-                    },
-                    _ => {
-                        print!("This settings is not a WasmSettingsClient");
-                        None
-                    }
+                if let Some(client_port) = client_port {
+                    Some(ClientConnection{
+                        runtime: None,
+                        connection_name,
+                        connected: false,
+                        ports: HashMap::new(),
+                        main_port: Some(client_port),
+                        local_uuid: None,
+                    })
+                }else {
+                    warn!("This settings is invalid");
+                    None
                 }
-            },
-            _ => {
-                print!("Invalid settings for main port");
+            }
+            PortSideSettings::Server(_) => {
+                warn!("Server settings not allowed on server");
                 None
             }
         }
@@ -169,55 +149,15 @@ impl ConnectionTrait for ClientConnection{
     fn start_connection(&mut self) {
         self.connected = true;
 
-        match &mut self.main_port {
-            PortClient::Wasm(client_wasm) => {
-                client_wasm.connect();
-            }
-            _ => {}
+        #[cfg(not(target_arch = "wasm32"))]
+        if self.runtime.is_none() {
+            self.runtime = Some(Runtime::new().unwrap());
         }
-    }
 
-    fn drop_connection(&mut self) {
+        if let Some(mut main_port) = self.main_port.take() {
+            main_port.connect(self);
 
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-impl ConnectionTrait for ClientConnection{
-    fn new(connection_name: &'static str, settings: PortSettings) -> Option<Self> {
-        match settings {
-            PortSettings::Tcp(tcp_settings) => {
-                match tcp_settings {
-                    TcpSettings::Client(tcp_settings_client) => {
-                        let client_tcp = ClientTcp::new(tcp_settings_client).with_main_port() ;
-
-                        Some(ClientConnection{
-                            runtime: None,
-                            connection_name,
-                            connected: false,
-                            ports: HashMap::new(),
-                            main_port: PortClient::Tcp(client_tcp),
-                            local_uuid: None,
-                        })
-                    },
-                    _ => {
-                        print!("This settings is not a TcpSettingsClient");
-                        None
-                    }
-                }
-            }
-        }
-    }
-
-    fn start_connection(&mut self) {
-        self.connected = true;
-
-        match &mut self.main_port {
-            PortClient::Tcp(client_tcp) => {
-                self.runtime = Some(Runtime::new().unwrap());
-                client_tcp.connect(&self.runtime);
-            }
-            _ => {}
+            self.main_port = Some(main_port);
         }
     }
 
@@ -229,7 +169,7 @@ impl ConnectionTrait for ClientConnection{
 }
 
 impl <T:ConnectionTrait> NetworkConnections<T> {
-    pub fn start_connection(&mut self, connection_name: &'static str, settings: PortSettings){
+    pub fn start_connection(&mut self, connection_name: &'static str, settings: PortSideSettings){
         if !self.can_connect(connection_name) { return };
 
         let connection = T::new(connection_name, settings);

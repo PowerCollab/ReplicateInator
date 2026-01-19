@@ -27,6 +27,7 @@ log = { version = "0.4.28", features = ["max_level_debug", "release_max_level_wa
 ciborium = { version = "0.2.2" }
 uuid = { version = "1.18.1" }
 serde = { version = "1.0.228" }
+erased-serde = { version = "0.4.9" }
 gloo-net = { version = "0.6.0" }
 wasm-bindgen-futures = { version = "0.4.55" }
 

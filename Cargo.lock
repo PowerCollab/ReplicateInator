@@ -2821,6 +2821,7 @@ version = "0.1.0"
 dependencies = [
  "bevy",
  "ciborium",
+ "erased-serde",
  "futures-util",
  "gloo-net",
  "log",

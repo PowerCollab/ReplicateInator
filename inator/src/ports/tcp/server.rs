@@ -3,8 +3,6 @@ use std::sync::Arc;
 use bevy::log::warn;
 use bevy::platform::collections::HashMap;
 use ciborium::into_writer;
-use serde::de::DeserializeOwned;
-use serde::Serialize;
 use tokio::io::{split, AsyncReadExt, AsyncWriteExt, ReadHalf, WriteHalf};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
@@ -18,7 +16,9 @@ use tokio_rustls::TlsAcceptor;
 use uuid::Uuid;
 use crate::NetworkSide;
 use crate::plugins::{BytesOptions, OrderOptions};
+use crate::plugins::connection::ServerConnection;
 use crate::plugins::messaging::MessageTrait;
+use crate::ports::{ServerPortTrait, ServerSettingsTrait};
 use crate::ports::tcp::reader_writer::{read_from_settings, read_from_settings_not_owned, read_value_to_usize, value_from_number, write_from_settings, write_from_settings_not_owned};
 
 pub enum StreamType{
@@ -51,7 +51,8 @@ pub struct TcpSettingsServer{
     pub(crate) auto_reconnect: bool,
     pub(crate) no_delay: bool,
     pub(crate) tls: bool,
-    pub(crate) tls_server_config: Option<Arc<ServerConfig>>
+    pub(crate) tls_server_config: Option<Arc<ServerConfig>>,
+    pub(crate) hook_stream: Option<fn(tcp_stream: TcpStream) -> TcpStream>
 }
 
 #[allow(dead_code)]
@@ -104,6 +105,7 @@ impl Default for TcpSettingsServer {
             no_delay: true,
             tls: false,
             tls_server_config: None,
+            hook_stream: None
         }
     }
 }
@@ -162,6 +164,7 @@ impl TcpSettingsServer {
             no_delay,
             tls: false,
             tls_server_config: None,
+            hook_stream: None
         }
     }
 
@@ -170,6 +173,12 @@ impl TcpSettingsServer {
         self.tls_server_config = Some(Arc::new(server_config));
 
         self
+    }
+}
+
+impl ServerSettingsTrait for TcpSettingsServer {
+    fn create_server_port(self: Box<Self>) -> Option<Box<dyn ServerPortTrait>> {
+        Some(Box::new(ServerTcp::new(*self)))
     }
 }
 
@@ -372,58 +381,10 @@ impl WriteType {
     }
 }
 
-impl ServerTcp {
-    pub fn new(settings: TcpSettingsServer) -> ServerTcp{
-        let (port_connected_sender,port_connected_receiver) = unbounded_channel::<TcpListener>();
-        let (connection_down_sender,connection_down_receiver) = unbounded_channel();
-        let (message_received_sender,message_received_receiver) = unbounded_channel::<(Vec<u8>,Uuid)>();
-        let (client_connected_sender,client_connected_receiver) = unbounded_channel::<(StreamType,SocketAddr)>();
-        let (client_authenticated_sender,client_authenticated_receiver) = unbounded_channel::<Uuid>();
-        let (client_disconnected_sender,client_disconnected_receiver) = unbounded_channel::<(Uuid,bool)>();
-        
-        ServerTcp{
-            settings,
-            connecting: false,
-            connected: false,
-            main_port: false,
-            accepting_connections: false,
-            tcp_listener: None,
+impl ServerPortTrait for ServerTcp{
+    fn connect(&mut self, server_connection: &mut ServerConnection) {
+        let runtime = &server_connection.runtime;
 
-            port_connected_receiver,
-            port_connected_sender: Arc::new(port_connected_sender),
-
-            connection_down_receiver,
-            connection_down_sender: Arc::new(connection_down_sender),
-
-            client_disconnected_receiver,
-            client_disconnected_sender: Arc::new(client_disconnected_sender),
-
-            message_received_receiver,
-            message_received_sender: Arc::new(message_received_sender),
-
-            client_connected_receiver,
-            client_connected_sender: Arc::new(client_connected_sender),
-
-            client_authenticated_receiver: Arc::new(Mutex::new(client_authenticated_receiver)),
-            client_authenticated_sender,
-
-            listening_clients: HashMap::new(),
-            not_authenticated_listening: HashMap::new(),
-        }
-    }
-    
-    pub fn set_auto_reconnect(mut self, auto_reconnect: bool) -> Self{
-        self.settings.auto_reconnect = auto_reconnect;
-        
-        self
-    }
-
-    pub fn with_main_port(mut self) -> Self {
-        self.main_port = true;
-        self
-    }
-    
-    pub fn connect(&mut self, runtime: &Option<Runtime>){
         if let Some(runtime) = runtime {
             if self.connecting {return;}
 
@@ -452,79 +413,81 @@ impl ServerTcp {
         }
     }
 
-    pub fn send_message<T: MessageTrait + Serialize + DeserializeOwned>(&mut self, message: &T, target: &Uuid, runtime: &Option<Runtime>){
-        if let Some(runtime) = runtime {
-            let mut buf = Vec::new();
+    fn authenticate_client(&mut self, uuid: Uuid, server_connection: &mut ServerConnection) {
+        if self.not_authenticated_listening.contains_key(&uuid){
+            let mut listening_infos = self.not_authenticated_listening.remove(&uuid).unwrap();
 
-            match into_writer(&message,&mut buf) {
+            listening_infos.listening = true;
+
+            self.listening_clients.insert(uuid, listening_infos);
+            self.start_listening_authenticated_client(uuid, server_connection);
+
+            match self.client_authenticated_sender.send(uuid) {
                 Ok(_) => {}
-                Err(_) => {
-                    warn!("Error to serialize message");
-                    return;
-                }
-            };
-
-            let bytes_options = self.settings.bytes;
-            let order_options = self.settings.order;
-            let listening_infos = match self.listening_clients.get_mut(target) {
-                Some(listening_infos) => listening_infos,
-                None => {
-                    warn!("Client from uuid {} not found ", target);
-                    return;
-                }
-            };
-            
-            let write_half = &listening_infos.read_write_type.get_write();
-
-            write_half.write(buf, bytes_options, order_options, &runtime);
+                Err(_) => {}
+            }
         }
     }
 
-    pub fn start_listening_authenticated_client(&mut self, target: &Uuid, runtime: &Option<Runtime>){
-        if let Some(runtime) = runtime {
-            let message_received_sender = Arc::clone(&self.message_received_sender);
-            let client_disconnected_sender = Arc::clone(&self.client_disconnected_sender);
+    fn as_main_port(&mut self) -> bool {
+        self.main_port = true;
+        true
+    }
 
-            let listening_infos = match self.listening_clients.get_mut(target) {
-                Some(listening_infos) => listening_infos,
-                None => {
-                    warn!("Client from uuid {} not found ", target);
-                    return;
-                }
-            };
-
-            let read_type = &listening_infos.read_write_type.get_read();
-            let bytes_options = self.settings.bytes;
-            let order_options = self.settings.order;
-            let target = *target;
-
-            read_type.read(target,bytes_options,order_options,runtime,message_received_sender,client_disconnected_sender, None);
+    fn check_messages_received(&mut self) -> (Option<Vec<u8>>, Option<Uuid>) {
+        match self.message_received_receiver.try_recv() {
+            Ok((bytes,sender)) => {
+                (Some(bytes), Some(sender))
+            }
+            Err(_) => {
+                (None, None)
+            }
         }
     }
 
-    pub fn start_listening_not_authenticated_client(&mut self, target: &Uuid, runtime: &Option<Runtime>){
-        if let Some(runtime) = runtime {
-            let client_authenticated_receiver = Arc::clone(&self.client_authenticated_receiver);
-            let message_received_sender = Arc::clone(&self.message_received_sender);
-            let client_disconnected_sender = Arc::clone(&self.client_disconnected_sender);
-            
-            let listening_infos = match self.not_authenticated_listening.get_mut(target) {
-                Some(listening_infos) => listening_infos,
-                None => {
-                    warn!("Client from uuid {} not found ", target);
-                    return;
-                }
-            };
-            let read_type = &listening_infos.read_write_type.get_read();
-            let bytes_options = self.settings.bytes;
-            let order_options = self.settings.order;
-            let target = *target;
+    fn check_port_dropped(&mut self) -> (bool, bool) {
+        match self.connection_down_receiver.try_recv() {
+            Ok(_) => {
+                self.connected = false;
+                self.connecting = false;
+                self.accepting_connections = false;
 
-            read_type.read(target,bytes_options,order_options,runtime,message_received_sender,client_disconnected_sender, Some(client_authenticated_receiver));
+                if self.settings.auto_reconnect {
+                    return (true,true)
+                }
+
+                match self.tcp_listener.take() {
+                    Some(tcp_listener) => {
+                        drop(tcp_listener);
+                    },
+                    None => {}
+                }
+
+                (true,false)
+            }
+            Err(_) => {
+                (false,false)
+            }
         }
     }
 
-    pub fn start_accepting_connections(&mut self, runtime: &Option<Runtime>){
+    fn check_port_connected(&mut self) {
+        if self.connected { return; }
+
+        match self.port_connected_receiver.try_recv() {
+            Ok(tcp_listener) => {
+                self.connected = true;
+                self.tcp_listener = Some(Arc::new(tcp_listener));
+            }
+            Err(_) => {
+                return;
+            }
+        }
+    }
+
+    fn start_accepting_connections(&mut self, server_connection: &mut ServerConnection) {
+        let runtime = &server_connection.runtime;
+
         if let Some(runtime) = runtime {
             if self.accepting_connections || !self.connected {return;}
 
@@ -540,6 +503,7 @@ impl ServerTcp {
                 None => { print!("Cant listening for clients because the listener is dropped"); self.accepting_connections = false; return }
             };
             let settings = &self.settings;
+            let hook_stream = settings.hook_stream;
 
             let mut tls_acceptor: Option<TlsAcceptor> = None;
 
@@ -553,23 +517,33 @@ impl ServerTcp {
 
                 loop {
                     match tcp_listener.accept().await {
-                        Ok((stream, addr)) => {
+                        Ok((mut stream, addr)) => {
+
+                            stream = match hook_stream {
+                                Some(hook_stream) => {
+                                    hook_stream(stream)
+                                }
+                                None => {
+                                    stream
+                                }
+                            };
+                            
                             match &semaphore {
                                 Some(semaphore) => {
                                     if recuse_when_full {
                                         match semaphore.try_acquire() {
                                             Ok(permit) => {
                                                 drop(permit);
-
+                                                
                                                 if let Some(acceptor) = &acceptor{
-                                                   match acceptor.accept(stream).await {
-                                                       Ok(tls_stream) => {
-                                                           client_connected_sender.send((StreamType::TlsStream(tls_stream), addr)).expect("Failed to send new client connected");
-                                                       }
-                                                       Err(_) => {
-                                                           println!("Error on accepting connection via tls");
-                                                       }
-                                                   }
+                                                    match acceptor.accept(stream).await {
+                                                        Ok(tls_stream) => {
+                                                            client_connected_sender.send((StreamType::TlsStream(tls_stream), addr)).expect("Failed to send new client connected");
+                                                        }
+                                                        Err(_) => {
+                                                            println!("Error on accepting connection via tls");
+                                                        }
+                                                    }
                                                 }else{
                                                     client_connected_sender.send((StreamType::Stream(stream), addr)).expect("Failed to send new client connected");
                                                 }
@@ -585,7 +559,7 @@ impl ServerTcp {
                                         match semaphore.acquire().await {
                                             Ok(permit) => {
                                                 drop(permit);
-
+                                                
                                                 if let Some(acceptor) = &acceptor{
                                                     match acceptor.accept(stream).await {
                                                         Ok(tls_stream) => {
@@ -628,6 +602,210 @@ impl ServerTcp {
                     }
                 }
             });
+        }
+    }
+
+    fn check_clients_diconnected(&mut self) {
+        match self.client_disconnected_receiver.try_recv() {
+            Ok((uuid,authenticated)) => {
+                let listening_infos = if authenticated {self.listening_clients.get_mut(&uuid)} else {self.not_authenticated_listening.get_mut(&uuid)};
+
+                if let Some(_) = listening_infos{
+                    if authenticated {
+                        self.listening_clients.remove(&uuid);
+                    }else{
+                        self.not_authenticated_listening.remove(&uuid);
+                    }
+                }
+            }
+            Err(_) => {
+
+            }
+        }
+    }
+
+    fn check_client_connected(&mut self) {
+        match self.client_connected_receiver.try_recv() {
+            Ok((stream_type,socket_addr)) => {
+                let new_uuid = Uuid::new_v4();
+                let settings = &self.settings;
+
+                match stream_type {
+                    StreamType::Stream(mut stream) => {
+                        match stream.set_nodelay(settings.no_delay) {
+                            Ok(_) => {}
+                            _ => {}
+                        }
+                        
+                        let (read_half,write_half) = stream.into_split();
+
+                        let listening_infos = ListeningInfos{
+                            read_write_type: ReadWriteType::Stream((Arc::new(Mutex::new(read_half)), Arc::new(Mutex::new(write_half)))),
+                            socket_addr,
+                            listening: false
+                        };
+
+                        self.not_authenticated_listening.insert(new_uuid, listening_infos);
+                    }
+                    StreamType::TlsStream(mut tls_stream) => {
+                        match tls_stream.get_mut().0.set_nodelay(settings.no_delay) {
+                            Ok(_) => {}
+                            _ => {}
+                        }
+                        
+                        
+
+                        let (read_half,write_half) = split(tls_stream);
+
+                        let listening_infos = ListeningInfos{
+                            read_write_type: ReadWriteType::TlsStream((Arc::new(Mutex::new(read_half)), Arc::new(Mutex::new(write_half)))),
+                            socket_addr,
+                            listening: false
+                        };
+
+                        self.not_authenticated_listening.insert(new_uuid, listening_infos);
+                    }
+                }
+            }
+            Err(_) => {
+
+            }
+        }
+    }
+
+    fn check_not_authenticated_clients(&mut self, server_connection: &mut ServerConnection) {
+        let mut keys_to_start = Vec::new();
+
+        for (key,infos) in self.not_authenticated_listening.iter_mut(){
+            if infos.listening { continue; }
+
+            infos.listening = true;
+
+            keys_to_start.push(*key);
+        }
+
+        for key in keys_to_start {
+            self.start_listening_not_authenticated_client(
+                key,
+                server_connection
+            );
+        }
+    }
+
+    fn start_listening_not_authenticated_client(&mut self, target: Uuid, server_connection: &mut ServerConnection) {
+        let runtime = &server_connection.runtime;
+
+        if let Some(runtime) = runtime {
+            let client_authenticated_receiver = Arc::clone(&self.client_authenticated_receiver);
+            let message_received_sender = Arc::clone(&self.message_received_sender);
+            let client_disconnected_sender = Arc::clone(&self.client_disconnected_sender);
+
+            let listening_infos = match self.not_authenticated_listening.get_mut(&target) {
+                Some(listening_infos) => listening_infos,
+                None => {
+                    warn!("Client from uuid {} not found ", target);
+                    return;
+                }
+            };
+            let read_type = &listening_infos.read_write_type.get_read();
+            let bytes_options = self.settings.bytes;
+            let order_options = self.settings.order;
+
+            read_type.read(target,bytes_options,order_options,runtime,message_received_sender,client_disconnected_sender, Some(client_authenticated_receiver));
+        }
+    }
+
+    fn start_listening_authenticated_client(&mut self, target: Uuid, server_connection: &mut ServerConnection) {
+        let runtime = &server_connection.runtime;
+        
+        if let Some(runtime) = runtime {
+            let message_received_sender = Arc::clone(&self.message_received_sender);
+            let client_disconnected_sender = Arc::clone(&self.client_disconnected_sender);
+
+            let listening_infos = match self.listening_clients.get_mut(&target) {
+                Some(listening_infos) => listening_infos,
+                None => {
+                    warn!("Client from uuid {} not found ", target);
+                    return;
+                }
+            };
+
+            let read_type = &listening_infos.read_write_type.get_read();
+            let bytes_options = self.settings.bytes;
+            let order_options = self.settings.order;
+
+            read_type.read(target,bytes_options,order_options,runtime,message_received_sender,client_disconnected_sender, None);
+        }
+    }
+
+    fn send_message(&mut self, message: Box<&dyn MessageTrait>, target: &Uuid, server_connection: &mut ServerConnection) {
+        let runtime = &server_connection.runtime;
+
+        if let Some(runtime) = runtime {
+            let mut buf = Vec::new();
+
+            match into_writer(&message,&mut buf) {
+                Ok(_) => {}
+                Err(_) => {
+                    warn!("Error to serialize message");
+                    return;
+                }
+            };
+
+            let bytes_options = self.settings.bytes;
+            let order_options = self.settings.order;
+            let listening_infos = match self.listening_clients.get_mut(target) {
+                Some(listening_infos) => listening_infos,
+                None => {
+                    warn!("Client from uuid {} not found ", target);
+                    return;
+                }
+            };
+
+            let write_half = &listening_infos.read_write_type.get_write();
+
+            write_half.write(buf, bytes_options, order_options, &runtime);
+        }
+    }
+}
+
+impl ServerTcp {
+    pub fn new(settings: TcpSettingsServer) -> ServerTcp{
+        let (port_connected_sender,port_connected_receiver) = unbounded_channel::<TcpListener>();
+        let (connection_down_sender,connection_down_receiver) = unbounded_channel();
+        let (message_received_sender,message_received_receiver) = unbounded_channel::<(Vec<u8>,Uuid)>();
+        let (client_connected_sender,client_connected_receiver) = unbounded_channel::<(StreamType,SocketAddr)>();
+        let (client_authenticated_sender,client_authenticated_receiver) = unbounded_channel::<Uuid>();
+        let (client_disconnected_sender,client_disconnected_receiver) = unbounded_channel::<(Uuid,bool)>();
+        
+        ServerTcp{
+            settings,
+            connecting: false,
+            connected: false,
+            main_port: false,
+            accepting_connections: false,
+            tcp_listener: None,
+
+            port_connected_receiver,
+            port_connected_sender: Arc::new(port_connected_sender),
+
+            connection_down_receiver,
+            connection_down_sender: Arc::new(connection_down_sender),
+
+            client_disconnected_receiver,
+            client_disconnected_sender: Arc::new(client_disconnected_sender),
+
+            message_received_receiver,
+            message_received_sender: Arc::new(message_received_sender),
+
+            client_connected_receiver,
+            client_connected_sender: Arc::new(client_connected_sender),
+
+            client_authenticated_receiver: Arc::new(Mutex::new(client_authenticated_receiver)),
+            client_authenticated_sender,
+
+            listening_clients: HashMap::new(),
+            not_authenticated_listening: HashMap::new(),
         }
     }
 }
