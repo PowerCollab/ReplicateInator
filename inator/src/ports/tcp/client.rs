@@ -399,6 +399,8 @@ impl ClientPortTrait for ClientTcp{
     }
 
     fn start_listening_to_server(&mut self, client_connection: &mut ClientConnection) {
+        if self.listening { return; }
+
         let runtime = &client_connection.runtime;
 
         if let Some(runtime) = runtime {
@@ -500,7 +502,7 @@ impl ClientTcp {
 }
 
 impl TcpSettingsClient{
-    pub fn new(address: IpAddr, port: u16, bytes: BytesOptions, order: OrderOptions, try_reconnect: bool, no_delay: bool) -> Self {
+    fn new(address: IpAddr, port: u16, bytes: BytesOptions, order: OrderOptions, try_reconnect: bool, no_delay: bool) -> Self {
         TcpSettingsClient{
             address,
             port,

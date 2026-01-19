@@ -223,6 +223,8 @@ impl ReadWriteType {
 
 impl ReadType {
     pub fn read(&self, target: Uuid, bytes_options: BytesOptions, order_options: OrderOptions, runtime: &Runtime, message_received_sender: Arc<UnboundedSender<(Vec<u8>,Uuid)>>, client_disconnected_sender: Arc<UnboundedSender<(Uuid,bool)>>, client_authenticated_receiver: Option<Arc<Mutex<UnboundedReceiver<Uuid>>>>) {
+        let is_authenticated = !client_authenticated_receiver.is_some();
+
         match self {
             ReadType::Stream(read) => {
                 let read = Arc::clone(read);
@@ -262,13 +264,13 @@ impl ReadType {
                                         message_received_sender.send((buf,target)).expect("Failed to send message");
                                     }
                                     Err(_) => {
-                                        client_disconnected_sender.send((target, true)).expect("Failed to send client disconnected");
+                                        client_disconnected_sender.send((target, is_authenticated)).expect("Failed to send client disconnected");
                                         return;
                                     }
                                 }
                             }
                             Err(_) => {
-                                client_disconnected_sender.send((target, true)).expect("Failed to send client disconnected");
+                                client_disconnected_sender.send((target, is_authenticated)).expect("Failed to send client disconnected");
                                 return;
                             }
                         }
@@ -313,13 +315,13 @@ impl ReadType {
                                         message_received_sender.send((buf,target)).expect("Failed to send message");
                                     }
                                     Err(_) => {
-                                        client_disconnected_sender.send((target, true)).expect("Failed to send client disconnected");
+                                        client_disconnected_sender.send((target, is_authenticated)).expect("Failed to send client disconnected");
                                         return;
                                     }
                                 }
                             }
                             Err(_) => {
-                                client_disconnected_sender.send((target, true)).expect("Failed to send client disconnected");
+                                client_disconnected_sender.send((target, is_authenticated)).expect("Failed to send client disconnected");
                                 return;
                             }
                         }
@@ -452,10 +454,6 @@ impl ServerPortTrait for ServerTcp{
                 self.connecting = false;
                 self.accepting_connections = false;
 
-                if self.settings.auto_reconnect {
-                    return (true,true)
-                }
-
                 match self.tcp_listener.take() {
                     Some(tcp_listener) => {
                         drop(tcp_listener);
@@ -463,7 +461,7 @@ impl ServerPortTrait for ServerTcp{
                     None => {}
                 }
 
-                (true,false)
+                (true,self.settings.auto_reconnect)
             }
             Err(_) => {
                 (false,false)
@@ -631,7 +629,7 @@ impl ServerPortTrait for ServerTcp{
                 let settings = &self.settings;
 
                 match stream_type {
-                    StreamType::Stream(mut stream) => {
+                    StreamType::Stream(stream) => {
                         match stream.set_nodelay(settings.no_delay) {
                             Ok(_) => {}
                             _ => {}
@@ -652,8 +650,6 @@ impl ServerPortTrait for ServerTcp{
                             Ok(_) => {}
                             _ => {}
                         }
-                        
-                        
 
                         let (read_half,write_half) = split(tls_stream);
 
@@ -770,7 +766,7 @@ impl ServerPortTrait for ServerTcp{
 }
 
 impl ServerTcp {
-    pub fn new(settings: TcpSettingsServer) -> ServerTcp{
+    fn new(settings: TcpSettingsServer) -> ServerTcp{
         let (port_connected_sender,port_connected_receiver) = unbounded_channel::<TcpListener>();
         let (connection_down_sender,connection_down_receiver) = unbounded_channel();
         let (message_received_sender,message_received_receiver) = unbounded_channel::<(Vec<u8>,Uuid)>();

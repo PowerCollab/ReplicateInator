@@ -310,7 +310,7 @@ impl ClientPortTrait for WasmClient{
 }
 
 impl WasmClient {
-    pub fn new(settings: WasmSettingsClient) -> Self {
+    fn new(settings: WasmSettingsClient) -> Self {
         let (message_received_sender,message_received_receiver) = unbounded_channel::<Vec<u8>>();
         let (message_queue_sender,message_queue_receiver) = unbounded_channel::<Vec<u8>>();
         let (connected_to_server_sender,connected_to_server_receiver) = unbounded_channel::<WebSocket>();
