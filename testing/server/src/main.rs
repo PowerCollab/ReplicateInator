@@ -1,6 +1,8 @@
 use bevy::app::App;
 use bevy::DefaultPlugins;
 use bevy::prelude::{ResMut, Startup};
+use bevy_egui::EguiPlugin;
+use bevy_inspector_egui::quick::WorldInspectorPlugin;
 use inator::NetworkSide;
 use inator::plugins::connection::{ConnectionPlugin, NetworkConnections, ServerConnection};
 use inator::ports::PortSideSettings;
@@ -15,5 +17,5 @@ fn start_connection(
 fn main() {
     App::new().add_plugins((DefaultPlugins,ConnectionPlugin{
         network_side: NetworkSide::Server,
-    })).add_systems(Startup, start_connection).run();
+    },EguiPlugin::default(),WorldInspectorPlugin::new())).add_systems(Startup, start_connection).run();
 }
