@@ -141,6 +141,7 @@ impl ClientPortTrait for WasmClient{
                             }
                         };
 
+                        println!("Connected to server");
                         connected_to_server_sender.send(web_socket).expect("Failed to send web socket connected");
                         return;
                     }

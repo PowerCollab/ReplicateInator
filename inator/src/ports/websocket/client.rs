@@ -192,6 +192,7 @@ impl ClientPortTrait for ClientWebSocket {
 
                 match result.await {
                     Ok((web_socket_stream,response)) => {
+                        println!("Connected to server");
                         connected_to_server_sender.send((web_socket_stream,response)).expect("Could not send connected_to_server");
                     },
                     Err(_) => {

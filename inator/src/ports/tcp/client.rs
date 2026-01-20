@@ -280,22 +280,25 @@ impl ClientPortTrait for ClientTcp{
                             };
 
                             let socket_address = tcp_stream.peer_addr().unwrap();
+
                             if let Some(tls_connector) = &tls_connector {
                                 match tls_connector.connect(server_name,tcp_stream).await {
                                     Ok(tls_stream) => {
+                                        println!("Connected to server");
                                         connected_to_server_sender.send((StreamType::TlsStream(tls_stream), socket_address)).expect("Error to send connected to server");
                                     }
                                     Err(_) => {
                                         if try_reconnect {
-                                            print!("Failed to connect to server, trying again");
+                                            println!("Failed to connect to server, trying again");
                                         }else{
-                                            print!("Failed to connect to server, closing the connection");
+                                            println!("Failed to connect to server, closing the connection");
                                             connection_down_sender.send(()).expect("Error to send connection down client");
                                             return;
                                         }
                                     }
                                 }
                             }else{
+                                println!("Connected to server");
                                 connected_to_server_sender.send((StreamType::Stream(tcp_stream), socket_address)).expect("Error to send connected to server");
                             }
 
@@ -303,9 +306,9 @@ impl ClientPortTrait for ClientTcp{
                         },
                         Err(_) => {
                             if try_reconnect {
-                                print!("Failed to connect to server, trying again");
+                                println!("Failed to connect to server, trying again");
                             }else{
-                                print!("Failed to connect to server, closing the connection");
+                                println!("Failed to connect to server, closing the connection");
                                 connection_down_sender.send(()).expect("Error to send connection down client");
                                 return;
                             }
@@ -501,6 +504,7 @@ impl ClientTcp {
     }
 }
 
+#[allow(dead_code)]
 impl TcpSettingsClient{
     fn new(address: IpAddr, port: u16, bytes: BytesOptions, order: OrderOptions, try_reconnect: bool, no_delay: bool) -> Self {
         TcpSettingsClient{

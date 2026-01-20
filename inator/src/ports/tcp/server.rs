@@ -402,12 +402,12 @@ impl ServerPortTrait for ServerTcp{
 
                     match tcp_listener_future.await {
                         Ok(tcp_listener) => {
-                            print!("Server successful connected");
+                            println!("Server successful connected");
                             port_connected_sender.send(tcp_listener).expect("Failed to send TCP listener");
                             break;
                         }
                         Err(_) => {
-                            print!("Server connection bind failed, trying again");
+                            println!("Server connection bind failed, trying again");
                         }
                     }
                 }
