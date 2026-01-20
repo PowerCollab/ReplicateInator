@@ -20,12 +20,12 @@ pub trait ServerPortTrait: PortTraits{
     fn connect(&mut self, server_connection: &mut ServerConnection);
     fn authenticate_client(&mut self, uuid: Uuid, server_connection: &mut ServerConnection);
     fn as_main_port(&mut self) -> bool;
-    fn check_messages_received(&mut self) -> (Option<Vec<u8>>, Option<Uuid>);
+    fn check_messages_received(&mut self) -> Vec<(Vec<u8>, Uuid)>;
     fn check_port_dropped(&mut self) -> (bool,bool);
-    fn check_port_connected(&mut self);
+    fn check_port_connected(&mut self) -> bool;
     fn start_accepting_connections(&mut self, server_connection: &mut ServerConnection);
-    fn check_clients_diconnected(&mut self);
-    fn check_client_connected(&mut self);
+    fn check_clients_diconnected(&mut self) -> Vec<Uuid>;
+    fn check_clients_connected(&mut self) -> Vec<Uuid>;
     fn check_not_authenticated_clients(&mut self, server_connection: &mut ServerConnection);
     fn start_listening_not_authenticated_client(&mut self, target: Uuid, server_connection: &mut ServerConnection);
     fn start_listening_authenticated_client(&mut self, target: Uuid, server_connection: &mut ServerConnection);
@@ -35,9 +35,9 @@ pub trait ServerPortTrait: PortTraits{
 pub trait ClientPortTrait: PortTraits{
     fn connect(&mut self, client_connection: &mut ClientConnection);
     fn as_main_port(&mut self) -> bool;
-    fn check_messages_received(&mut self) -> Option<Vec<u8>>;
+    fn check_messages_received(&mut self) -> Vec<Vec<u8>>;
     fn check_port_dropped(&mut self) -> (bool,bool);
-    fn check_connected_to_server(&mut self);
+    fn check_connected_to_server(&mut self) -> bool;
     fn start_listening_to_server(&mut self, client_connection: &mut ClientConnection);
     fn send_message(&mut self, message: Box<&dyn MessageTrait>, client_connection: &mut ClientConnection);
 }

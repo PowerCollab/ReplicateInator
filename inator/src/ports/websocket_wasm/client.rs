@@ -4,8 +4,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use bevy::prelude::warn;
-use bevy::reflect::erased_serde::__private::serde::de::DeserializeOwned;
-use bevy::reflect::erased_serde::__private::serde::Serialize;
 use ciborium::into_writer;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
@@ -165,15 +163,21 @@ impl ClientPortTrait for WasmClient{
         true
     }
 
-    fn check_messages_received(&mut self) -> Option<Vec<u8>> {
-        match self.message_received_receiver.try_recv() {
-            Ok(bytes) => {
-                Some(bytes)
-            }
-            Err(_) => {
-                None
+    fn check_messages_received(&mut self) -> Vec<Vec<u8>> {
+        let mut messages_byes = Vec::new();
+
+        loop {
+            match self.message_received_receiver.try_recv() {
+                Ok(bytes) => {
+                    messages_byes.push(bytes);
+                },
+                Err(_) =>{
+                    break
+                }
             }
         }
+
+        messages_byes
     }
 
     fn check_port_dropped(&mut self) -> (bool, bool) {
@@ -201,8 +205,8 @@ impl ClientPortTrait for WasmClient{
         }
     }
 
-    fn check_connected_to_server(&mut self) {
-        if self.connected { return; }
+    fn check_connected_to_server(&mut self) -> bool {
+        if self.connected { return false }
 
         match self.connected_to_server_receiver.try_recv() {
             Ok(web_socket) => {
@@ -212,8 +216,12 @@ impl ClientPortTrait for WasmClient{
 
                 self.split_sink = Some(Rc::new(RefCell::new(sink)));
                 self.split_stream = Some(Rc::new(RefCell::new(stream)));
+                
+                true
             }
-            Err(_) => {}
+            Err(_) => {
+                false
+            }
         }
     }
 

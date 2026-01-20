@@ -325,15 +325,21 @@ impl ClientPortTrait for ClientTcp{
         true
     }
 
-    fn check_messages_received(&mut self) -> Option<Vec<u8>> {
-        match self.message_received_receiver.try_recv() {
-            Ok(bytes) => {
-                Some(bytes)
-            },
-            Err(_) =>{
-                None
+    fn check_messages_received(&mut self) -> Vec<Vec<u8>> {
+        let mut messages_byes = Vec::new();
+
+        loop {
+            match self.message_received_receiver.try_recv() {
+                Ok(bytes) => {
+                    messages_byes.push(bytes);
+                },
+                Err(_) =>{
+                    break
+                }
             }
-        }
+        } 
+        
+        messages_byes
     }
 
     fn check_port_dropped(&mut self) -> (bool, bool) {
@@ -361,8 +367,8 @@ impl ClientPortTrait for ClientTcp{
         }
     }
 
-    fn check_connected_to_server(&mut self) {
-        if self.connected { return; }
+    fn check_connected_to_server(&mut self) -> bool {
+        if self.connected { return false }
 
         match self.connected_to_server_receiver.try_recv() {
             Ok((stream_type, socket)) => {
@@ -381,7 +387,9 @@ impl ClientPortTrait for ClientTcp{
 
                         self.write_half = Some(WriteType::Stream(Arc::new(Mutex::new(write_half))));
                         self.read_half = Some(ReadType::Stream(Arc::new(Mutex::new(read_half))));
-                        self.socket_addr = Some(socket)
+                        self.socket_addr = Some(socket);
+                        
+                        true
                     }
                     StreamType::TlsStream(mut tls_stream) => {
                         match tls_stream.get_mut().0.set_nodelay(settings.no_delay) {
@@ -393,11 +401,15 @@ impl ClientPortTrait for ClientTcp{
 
                         self.write_half = Some(WriteType::TlsStream(Arc::new(Mutex::new(write_half))));
                         self.read_half = Some(ReadType::TlsStream(Arc::new(Mutex::new(read_half))));
-                        self.socket_addr = Some(socket)
+                        self.socket_addr = Some(socket);
+                        
+                        true
                     }
                 }
             }
-            Err(_) => {}
+            Err(_) => {
+                false
+            }
         }
     }
 

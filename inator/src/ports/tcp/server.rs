@@ -436,15 +436,21 @@ impl ServerPortTrait for ServerTcp{
         true
     }
 
-    fn check_messages_received(&mut self) -> (Option<Vec<u8>>, Option<Uuid>) {
-        match self.message_received_receiver.try_recv() {
-            Ok((bytes,sender)) => {
-                (Some(bytes), Some(sender))
-            }
-            Err(_) => {
-                (None, None)
+    fn check_messages_received(&mut self) -> Vec<(Vec<u8>, Uuid)> {
+        let mut messages_vector = Vec::new();
+
+        loop {
+            match self.message_received_receiver.try_recv() {
+                Ok((bytes,sender)) => {
+                    messages_vector.push((bytes,sender));
+                }
+                Err(_) => {
+                    break
+                }
             }
         }
+
+        messages_vector
     }
 
     fn check_port_dropped(&mut self) -> (bool, bool) {
@@ -469,16 +475,18 @@ impl ServerPortTrait for ServerTcp{
         }
     }
 
-    fn check_port_connected(&mut self) {
-        if self.connected { return; }
+    fn check_port_connected(&mut self) -> bool {
+        if self.connected { return false }
 
         match self.port_connected_receiver.try_recv() {
             Ok(tcp_listener) => {
                 self.connected = true;
                 self.tcp_listener = Some(Arc::new(tcp_listener));
+
+                true
             }
             Err(_) => {
-                return;
+                false
             }
         }
     }
@@ -603,7 +611,9 @@ impl ServerPortTrait for ServerTcp{
         }
     }
 
-    fn check_clients_diconnected(&mut self) {
+    fn check_clients_diconnected(&mut self) -> Vec<Uuid> {
+        let mut clients_disconnected = Vec::new();
+
         match self.client_disconnected_receiver.try_recv() {
             Ok((uuid,authenticated)) => {
                 let listening_infos = if authenticated {self.listening_clients.get_mut(&uuid)} else {self.not_authenticated_listening.get_mut(&uuid)};
@@ -615,14 +625,20 @@ impl ServerPortTrait for ServerTcp{
                         self.not_authenticated_listening.remove(&uuid);
                     }
                 }
+
+                clients_disconnected.push(uuid);
             }
             Err(_) => {
 
             }
         }
+
+        clients_disconnected
     }
 
-    fn check_client_connected(&mut self) {
+    fn check_clients_connected(&mut self) -> Vec<Uuid> {
+        let mut clients_connected = Vec::new();
+
         match self.client_connected_receiver.try_recv() {
             Ok((stream_type,socket_addr)) => {
                 let new_uuid = Uuid::new_v4();
@@ -643,6 +659,8 @@ impl ServerPortTrait for ServerTcp{
                             listening: false
                         };
 
+                        clients_connected.push(new_uuid);
+
                         self.not_authenticated_listening.insert(new_uuid, listening_infos);
                     }
                     StreamType::TlsStream(mut tls_stream) => {
@@ -659,6 +677,8 @@ impl ServerPortTrait for ServerTcp{
                             listening: false
                         };
 
+                        clients_connected.push(new_uuid);
+
                         self.not_authenticated_listening.insert(new_uuid, listening_infos);
                     }
                 }
@@ -667,6 +687,8 @@ impl ServerPortTrait for ServerTcp{
 
             }
         }
+
+        clients_connected
     }
 
     fn check_not_authenticated_clients(&mut self, server_connection: &mut ServerConnection) {

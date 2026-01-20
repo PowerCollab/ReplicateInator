@@ -214,15 +214,21 @@ impl ClientPortTrait for ClientWebSocket {
         true
     }
 
-    fn check_messages_received(&mut self) -> Option<Vec<u8>> {
-        match self.message_received_receiver.try_recv() {
-            Ok(bytes) => {
-                Some(bytes)
-            },
-            Err(_) =>{
-                None
+    fn check_messages_received(&mut self) -> Vec<Vec<u8>> {
+        let mut messages_byes = Vec::new();
+
+        loop {
+            match self.message_received_receiver.try_recv() {
+                Ok(bytes) => {
+                    messages_byes.push(bytes);
+                },
+                Err(_) =>{
+                    break
+                }
             }
         }
+
+        messages_byes
     }
 
     fn check_port_dropped(&mut self) -> (bool, bool) {
@@ -250,8 +256,8 @@ impl ClientPortTrait for ClientWebSocket {
         }
     }
 
-    fn check_connected_to_server(&mut self) {
-        if self.connected { return; }
+    fn check_connected_to_server(&mut self) -> bool {
+        if self.connected { return false; }
 
         match self.connected_to_server_receiver.try_recv() {
             Ok((mut web_socket_stream,_)) => {
@@ -271,10 +277,12 @@ impl ClientPortTrait for ClientWebSocket {
                 let (split_sink,split_stream) = web_socket_stream.split();
 
                 self.split_sink = Some(Arc::new(Mutex::new(split_sink)));
-                self.split_stream = Some(Arc::new(Mutex::new(split_stream)))
+                self.split_stream = Some(Arc::new(Mutex::new(split_stream)));
+                
+                true
             }
             Err(_) => {
-
+                false
             }
         }
     }

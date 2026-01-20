@@ -195,7 +195,9 @@ pub fn read_messages_client(
 
         match main_port {
             Some(main_port) => {
-                if let Some(bytes) = main_port.check_messages_received() {
+                let messages_bytes = main_port.check_messages_received();
+
+                for bytes in messages_bytes {
                     let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
 
                     match message_infos {
@@ -215,8 +217,6 @@ pub fn read_messages_client(
                             continue
                         }
                     }
-                }else {
-                    continue
                 }
             },
             None => {
@@ -236,7 +236,9 @@ pub fn read_messages_server(
 
         match main_port {
             Some(main_port) => {
-                if let (Some(bytes), Some(sender)) = main_port.check_messages_received() {
+                let messages_vector =main_port.check_messages_received();
+
+                for (bytes,sender) in messages_vector {
                     let message_infos: Result<MessageInfos, _> = from_reader(bytes.as_slice());
 
                     match message_infos {
@@ -264,8 +266,6 @@ pub fn read_messages_server(
                             continue
                         }
                     }
-                }else {
-                    continue
                 }
             },
             None => {
