@@ -22,12 +22,12 @@ opt-level = "s"
 strip = "debuginfo"
 
 [workspace.dependencies]
-bevy = { version = "0.17.3", features = ["dynamic_linking"] }
-log = { version = "0.4.28", features = ["max_level_debug", "release_max_level_warn"] }
+bevy = { version = "0.18.0", features = ["dynamic_linking"] }
+log = { version = "0.4.29", features = ["max_level_debug", "release_max_level_warn"] }
 ciborium = { version = "0.2.2" }
-uuid = { version = "1.18.1" }
+uuid = { version = "1.19.0" }
 serde = { version = "1.0.228" }
 erased-serde = { version = "0.4.9" }
 gloo-net = { version = "0.6.0" }
-wasm-bindgen-futures = { version = "0.4.55" }
+wasm-bindgen-futures = { version = "0.4.58" }
 

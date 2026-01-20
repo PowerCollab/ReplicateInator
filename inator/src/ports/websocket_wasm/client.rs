@@ -147,6 +147,7 @@ impl ClientPortTrait for WasmClient{
                     _ => {
                         if try_reconnect {
                             warn!("Failed to open websocket, retrying");
+                            gloo_timers::future::TimeoutFuture::new(2000).await;
                         }else{
                             warn!("Failed to open websocket, closing all");
                             connection_down_sender.send(()).expect("Failed to send connection down");

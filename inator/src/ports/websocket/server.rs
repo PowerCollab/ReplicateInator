@@ -5,12 +5,16 @@ use bevy::platform::collections::HashMap;
 use ciborium::into_writer;
 use futures_util::stream::{SplitSink, SplitStream};
 use futures_util::{SinkExt, StreamExt};
+use rustls::ServerConfig;
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio::sync::{Mutex, Semaphore};
 use tokio::sync::mpsc::error::TryRecvError;
+use tokio_rustls::server::TlsStream;
+use tokio_rustls::TlsAcceptor;
 use tokio_tungstenite::{accept_async, WebSocketStream};
 use tokio_tungstenite::tungstenite::{Bytes, Message};
+use tungstenite::Error;
 use uuid::Uuid;
 use crate::plugins::connection::ServerConnection;
 use crate::plugins::messaging::MessageTrait;
@@ -23,15 +27,31 @@ pub struct WebSocketSettingsServer{
     pub(crate) recuse_when_full: bool,
     pub(crate) auto_reconnect: bool,
     pub(crate) no_delay: bool,
-    pub(crate) hook_stream: Option<fn(tcp_stream: TcpStream) -> TcpStream>
+    pub(crate) hook_stream: Option<fn(tcp_stream: TcpStream) -> TcpStream>,
+    pub(crate) tls_config: Option<Arc<ServerConfig>>
 }
 
 #[allow(dead_code)]
 pub struct ListeningInfos{
-    pub(crate) split_sink: Arc<Mutex<SplitSink<WebSocketStream<TcpStream>,Message>>>,
-    pub(crate) split_stream: Arc<Mutex<SplitStream<WebSocketStream<TcpStream>>>>,
+    pub(crate) split_sink: Arc<Mutex<SplitSinkType>>,
+    pub(crate) split_stream: Arc<Mutex<SplitStreamType>>,
     pub(crate) socket_addr: SocketAddr,
     pub(crate) listening: bool
+}
+
+pub enum WebSocketType{
+    TcpStream(WebSocketStream<TcpStream>),
+    TlsStream(WebSocketStream<TlsStream<TcpStream>>),
+}
+
+pub enum SplitSinkType{
+    TcpStream(SplitSink<WebSocketStream<TcpStream>,Message>),
+    TlsStream(SplitSink<WebSocketStream<TlsStream<TcpStream>>,Message>),
+}
+
+pub enum SplitStreamType{
+    TcpStream(SplitStream<WebSocketStream<TcpStream>>),
+    TlsStream(SplitStream<WebSocketStream<TlsStream<TcpStream>>>),
 }
 
 pub struct ServerWebSocket{
@@ -60,8 +80,8 @@ pub struct ServerWebSocket{
     pub(crate) listening_clients: HashMap<Uuid,ListeningInfos>,
     pub(crate) not_authenticated_listening: HashMap<Uuid,ListeningInfos>,
 
-    pub(crate) client_connected_receiver: UnboundedReceiver<(WebSocketStream<TcpStream>,SocketAddr)>,
-    pub(crate) client_connected_sender: Arc<UnboundedSender<(WebSocketStream<TcpStream>,SocketAddr)>>,
+    pub(crate) client_connected_receiver: UnboundedReceiver<(WebSocketType,SocketAddr)>,
+    pub(crate) client_connected_sender: Arc<UnboundedSender<(WebSocketType,SocketAddr)>>,
 }
 
 impl ServerSettingsTrait for WebSocketSettingsServer {
@@ -191,6 +211,14 @@ impl ServerPortTrait for ServerWebSocket {
                 Some(tcp_listener) => Arc::clone(&tcp_listener),
                 None => { print!("Cant listening for clients because the listener is dropped"); self.accepting_connections = false; return }
             };
+            let acceptor = match &settings.tls_config {
+                Some(tls_config) => {
+                    Some(TlsAcceptor::from(Arc::clone(tls_config)))
+                },
+                None => {
+                    None
+                }
+            };
 
             runtime.spawn(async move {
                 let semaphore: Option<Semaphore> = if max_connections > 0 { Some(Semaphore::new(max_connections)) } else { None };
@@ -220,14 +248,7 @@ impl ServerPortTrait for ServerWebSocket {
                                             Ok(permit) => {
                                                 drop(permit);
 
-                                                match accept_async(stream).await {
-                                                    Ok(web_stream) => {
-                                                        client_connected_sender.send((web_stream, addr)).expect("Failed to send new client connected");
-                                                    }
-                                                    Err(_) => {
-                                                        println!("Failed to convert stream to web socket")
-                                                    }
-                                                };
+                                                ServerWebSocket::accept_stream(stream, addr, &acceptor, &client_connected_sender).await;
                                             }
                                             Err(_) => {
                                                 println!("Connection is full, rejecting connection to {}", addr);
@@ -241,14 +262,7 @@ impl ServerPortTrait for ServerWebSocket {
                                             Ok(permit) => {
                                                 drop(permit);
 
-                                                match accept_async(stream).await {
-                                                    Ok(web_stream) => {
-                                                        client_connected_sender.send((web_stream, addr)).expect("Failed to send new client connected");
-                                                    }
-                                                    Err(_) => {
-                                                        println!("Failed to convert stream to web socket")
-                                                    }
-                                                };
+                                                ServerWebSocket::accept_stream(stream, addr, &acceptor, &client_connected_sender).await;
                                             }
                                             Err(_) => {
                                                 drop(stream);
@@ -257,14 +271,7 @@ impl ServerPortTrait for ServerWebSocket {
                                     }
                                 }
                                 None => {
-                                    match accept_async(stream).await {
-                                        Ok(web_stream) => {
-                                            client_connected_sender.send((web_stream, addr)).expect("Failed to send new client connected");
-                                        }
-                                        Err(_) => {
-                                            println!("Failed to convert stream to web socket")
-                                        }
-                                    };
+                                    ServerWebSocket::accept_stream(stream, addr, &acceptor, &client_connected_sender).await;
                                 }
                             }
                         }
@@ -484,7 +491,8 @@ impl Default for WebSocketSettingsServer {
             recuse_when_full: false,
             auto_reconnect: true,
             no_delay: true,
-            hook_stream: None
+            hook_stream: None,
+            tls_config: None
         }
     }
 }
@@ -494,7 +502,7 @@ impl Default for ServerWebSocket {
         let (port_connected_sender,port_connected_receiver) = unbounded_channel::<TcpListener>();
         let (connection_down_sender,connection_down_receiver) = unbounded_channel();
         let (message_received_sender,message_received_receiver) = unbounded_channel::<(Vec<u8>,Uuid)>();
-        let (client_connected_sender,client_connected_receiver) = unbounded_channel::<(WebSocketStream<TcpStream>,SocketAddr)>();
+        let (client_connected_sender,client_connected_receiver) = unbounded_channel::<(WebSocketType,SocketAddr)>();
         let (client_authenticated_sender,client_authenticated_receiver) = unbounded_channel::<Uuid>();
         let (client_disconnected_sender,client_disconnected_receiver) = unbounded_channel::<(Uuid,bool)>();
 
@@ -539,8 +547,15 @@ impl WebSocketSettingsServer{
             recuse_when_full,
             auto_reconnect,
             no_delay,
-            hook_stream: None
+            hook_stream: None,
+            tls_config: None
         }
+    }
+
+    pub fn with_tls_config(mut self, server_config: ServerConfig) -> Self {
+        self.tls_config = Some(Arc::new(server_config));
+
+        self
     }
 }
 
@@ -549,7 +564,7 @@ impl ServerWebSocket {
         let (port_connected_sender,port_connected_receiver) = unbounded_channel::<TcpListener>();
         let (connection_down_sender,connection_down_receiver) = unbounded_channel();
         let (message_received_sender,message_received_receiver) = unbounded_channel::<(Vec<u8>,Uuid)>();
-        let (client_connected_sender,client_connected_receiver) = unbounded_channel::<(WebSocketStream<TcpStream>,SocketAddr)>();
+        let (client_connected_sender,client_connected_receiver) = unbounded_channel::<(WebSocketType,SocketAddr)>();
         let (client_authenticated_sender,client_authenticated_receiver) = unbounded_channel::<Uuid>();
         let (client_disconnected_sender,client_disconnected_receiver) = unbounded_channel::<(Uuid,bool)>();
 
@@ -581,6 +596,85 @@ impl ServerWebSocket {
 
             listening_clients: HashMap::new(),
             not_authenticated_listening: HashMap::new(),
+        }
+    }
+
+    pub(crate) async fn accept_stream(stream: TcpStream, addr: SocketAddr, acceptor: &Option<TlsAcceptor>, client_connected_sender: &Arc<UnboundedSender<(WebSocketType,SocketAddr)>>) {
+        match &acceptor {
+            Some(acceptor) => {
+                match acceptor.accept(stream).await {
+                    Ok(tls_stream) => {
+                        match accept_async(tls_stream).await {
+                            Ok(web_stream) => {
+                                client_connected_sender.send((WebSocketType::TlsStream(web_stream), addr)).expect("Failed to send new client connected");
+                            }
+                            Err(e) => eprintln!("Error no handshake WS: {}", e),
+                        }
+                    },
+                    Err(_) => {
+                        println!("Failed to convert stream to tls stream")
+                    }
+                }
+            },
+            None => {
+                match accept_async(stream).await {
+                    Ok(web_stream) => {
+                        client_connected_sender.send((WebSocketType::TcpStream(web_stream), addr)).expect("Failed to send new client connected");
+                    }
+                    Err(_) => {
+                        println!("Failed to convert stream to web socket")
+                    }
+                };
+            }
+        }
+    }
+}
+
+impl WebSocketType {
+    fn split(self) -> (SplitSinkType,SplitStreamType) {
+        match self {
+            WebSocketType::TcpStream(stream) => {
+                let (sink,stream) = stream.split();
+
+                (SplitSinkType::TcpStream(sink), SplitStreamType::TcpStream(stream))
+            }
+            WebSocketType::TlsStream(tls_stream) => {
+                let (sink,stream) = tls_stream.split();
+
+                (SplitSinkType::TlsStream(sink), SplitStreamType::TlsStream(stream))
+            }
+        }
+    }
+}
+
+impl SplitSinkType {
+    async fn send(&mut self, data: Message) -> Result<(), Error> {
+        match self {
+            SplitSinkType::TcpStream(sink_stream) => {
+                match sink_stream.send(data).await {
+                    Ok(_) => { Ok(()) }
+                    Err(e) => {
+                        Err(e)
+                    }
+                }
+            },
+            SplitSinkType::TlsStream(sink_tls) => {
+                match sink_tls.send(data).await {
+                    Ok(_) => { Ok(()) }
+                    Err(e) => {
+                        Err(e)
+                    }
+                }
+            }
+        }
+    }
+}
+
+impl SplitStreamType {
+    async fn next(&mut self) -> Option<Result<Message, Error>> {
+        match self {
+            SplitStreamType::TcpStream(split_tcp) => split_tcp.next().await,
+            SplitStreamType::TlsStream(split_tls) => split_tls.next().await,
         }
     }
 }
