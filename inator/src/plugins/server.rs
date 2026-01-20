@@ -106,7 +106,7 @@ fn check_client_connected_to_port(
         
         match main_port { 
             Some(main_port) => {
-                main_port.check_client_connected();
+                main_port.check_clients_diconnected();
             }
             None => {
                 continue
