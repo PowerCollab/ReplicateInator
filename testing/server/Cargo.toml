@@ -1,0 +1,9 @@
+[package]
+name = "server"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+inator = {path = "../../inator"}
+bevy = { workspace = true }
+log = { workspace = true }

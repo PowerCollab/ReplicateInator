@@ -6,6 +6,8 @@
       <sourceFolder url="file://$MODULE_DIR$/inator/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/src" isTestSource="false" />
       <sourceFolder url="file://$MODULE_DIR$/pro_macros/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/testing/client/src" isTestSource="false" />
+      <sourceFolder url="file://$MODULE_DIR$/testing/server/src" isTestSource="false" />
       <excludeFolder url="file://$MODULE_DIR$/Inator/target" />
       <excludeFolder url="file://$MODULE_DIR$/Replicator/target" />
       <excludeFolder url="file://$MODULE_DIR$/target" />

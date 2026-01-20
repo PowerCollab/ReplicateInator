@@ -53,7 +53,7 @@ impl ConnectionTrait for ServerConnection{
     fn new(connection_name: &'static str, settings: PortSideSettings) -> Option<Self>
     {
         match settings {
-            PortSideSettings::Server(mut settings) => {
+            PortSideSettings::Server(settings) => {
                 let server_port_option = settings.create_server_port();
 
                 if let Some(server_port) = server_port_option {
